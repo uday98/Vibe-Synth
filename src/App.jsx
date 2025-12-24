@@ -31,15 +31,38 @@ export default function VibeSynth() {
     const buffer = ctx.createBuffer(1, sampleRate * duration, sampleRate);
     const data = buffer.getChannelData(0);
 
-    // Vibe Logic: Changes tone based on text prompt length/content
-    const freq = prompt.toLowerCase().includes('dark') ? 55 : (prompt.length > 10 ? 220 : 440);
+    const words = prompt.toLowerCase().split(' ');
+    const activeVibes = words.filter(word => VibeLibrary[word]);
+  
+  // 2. Default "Safe" Values
+  let settings = { baseFreq: 220, waveType: "sine", noise: 0, fm: 0, dist: 0 };
 
-    for (let i = 0; i < buffer.length; i++) {
+  // 3. Blend the Settings (If user types "Dark Industrial", it mixes both)
+  if (activeVibes.length > 0) {
+    activeVibes.forEach(v => {
+      const p = VibeLibrary[v];
+      settings.baseFreq = p.baseFreq;
+      settings.noise += p.noiseAmount;
+      settings.fm += p.fmIndex;
+      settings.dist += p.distortion;
+    });
+  }
+
+  // 4. Generate the Waveform
+  for (let i = 0; i < buffer.length; i++) {
       const t = i / sampleRate;
-      const mainTone = Math.sin(2 * Math.PI * freq * t);
-      const texture = (Math.random() * 2 - 1) * 0.08; // AI Noise
-      
-      let env = 0;
+    
+      // FM Formula: Carrier + (Modulator * Index)
+      const modulator = Math.sin(2 * Math.PI * (settings.baseFreq * 1.5) * t) * settings.fm;
+      let signal = Math.sin(2 * Math.PI * settings.baseFreq * t + modulator);
+    
+      // Add Noise
+      signal += (Math.random() * 2 - 1) * settings.noise;
+    
+      // Add Distortion (Wavefolding)
+      if (settings.dist > 0) {
+        signal = Math.tanh(signal * (1 + settings.dist * 5));
+      }
       if (t < adsr.attack) env = t / adsr.attack;
       else if (t < adsr.attack + adsr.decay) env = 1 - ((t - adsr.attack) / adsr.decay) * (1 - adsr.sustain);
       else env = adsr.sustain;
