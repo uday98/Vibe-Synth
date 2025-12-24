@@ -23,64 +23,85 @@ export default function VibeSynth() {
   };
 
   const synthesizeSound = async () => {
-    initAudio();
-    setIsGenerating(true);
-    
-    const ctx = audioCtx.current;
-    const sampleRate = ctx.sampleRate;
-    const duration = 2.0;
-    const buffer = ctx.createBuffer(1, sampleRate * duration, sampleRate);
-    const data = buffer.getChannelData(0);
-
-    const words = prompt.toLowerCase().split(' ');
-    const activeVibes = words.filter(word => VibeLibrary[word]);
+  initAudio();
+  setIsGenerating(true);
   
-  // 2. Default "Safe" Values
-  let settings = { baseFreq: 220, waveType: "sine", noise: 0, fm: 0, dist: 0 };
+  const ctx = audioCtx.current;
+  const sampleRate = ctx.sampleRate;
+  const duration = 2.0; // 2-second sample length
+  const buffer = ctx.createBuffer(1, sampleRate * duration, sampleRate);
+  const data = buffer.getChannelData(0);
 
-  // 3. Blend the Settings (If user types "Dark Industrial", it mixes both)
+  // 1. SCAN PROMPT FOR KEYWORDS
+  const words = prompt.toLowerCase().split(/\s+/);
+  const activeVibes = words.filter(word => VibeLibrary[word]);
+
+  // Default values if no keyword is found
+  let settings = { baseFreq: 220, noise: 0.01, fm: 0, dist: 0 };
+
+  // 2. BLEND VIBES (Averaging the "DNA")
   if (activeVibes.length > 0) {
+    let totalFreq = 0;
+    let totalNoise = 0;
+    let totalFM = 0;
+    let totalDist = 0;
+
     activeVibes.forEach(v => {
       const p = VibeLibrary[v];
-      settings.baseFreq = p.baseFreq;
-      settings.noise += p.noiseAmount;
-      settings.fm += p.fmIndex;
-      settings.dist += p.distortion;
+      totalFreq += p.baseFreq;
+      totalNoise += p.noise;
+      totalFM += p.fmIndex;
+      totalDist += p.dist;
     });
+
+    settings.baseFreq = totalFreq / activeVibes.length;
+    settings.noise = totalNoise / activeVibes.length;
+    settings.fm = totalFM / activeVibes.length;
+    settings.dist = totalDist / activeVibes.length;
   }
 
-  // 4. Generate the Waveform
+  // 3. RENDER THE AUDIO DATA
   for (let i = 0; i < buffer.length; i++) {
-      const t = i / sampleRate;
+    const t = i / sampleRate;
     
-      // FM Formula: Carrier + (Modulator * Index)
-      const modulator = Math.sin(2 * Math.PI * (settings.baseFreq * 1.5) * t) * settings.fm;
-      let signal = Math.sin(2 * Math.PI * settings.baseFreq * t + modulator);
+    // Carrier Frequency + (Modulator * Index)
+    // We use a 1.618 (Golden Ratio) multiplier for the modulator for "musical" harmonics
+    const modulator = Math.sin(2 * Math.PI * (settings.baseFreq * 1.618) * t) * settings.fm;
+    let signal = Math.sin(2 * Math.PI * settings.baseFreq * t + modulator);
     
-      // Add Noise
-      signal += (Math.random() * 2 - 1) * settings.noise;
-    
-      // Add Distortion (Wavefolding)
-      if (settings.dist > 0) {
-        signal = Math.tanh(signal * (1 + settings.dist * 5));
-      }
-      if (t < adsr.attack) env = t / adsr.attack;
-      else if (t < adsr.attack + adsr.decay) env = 1 - ((t - adsr.attack) / adsr.decay) * (1 - adsr.sustain);
-      else env = adsr.sustain;
-      
-      if (t > duration - adsr.release) {
-        const releaseTime = t - (duration - adsr.release);
-        env *= Math.max(0, 1 - releaseTime / adsr.release);
-      }
-      data[i] = (mainTone + texture) * env;
+    // Add Layered Noise
+    const whiteNoise = (Math.random() * 2 - 1) * settings.noise;
+    signal += whiteNoise;
+
+    // Apply Saturation / Distortion
+    if (settings.dist > 0) {
+      // Soft-clipping using Hyperbolic Tangent
+      signal = Math.tanh(signal * (1 + settings.dist * 4));
     }
 
-    setTimeout(() => {
-      setAudioBuffer(buffer);
-      setIsGenerating(false);
-      playBuffer(buffer);
-    }, 800);
-  };
+    // Apply ADSR Envelope
+    let env = 0;
+    if (t < adsr.attack) {
+      env = t / adsr.attack;
+    } else if (t < adsr.attack + adsr.decay) {
+      env = 1 - ((t - adsr.attack) / adsr.decay) * (1 - adsr.sustain);
+    } else if (t < duration - adsr.release) {
+      env = adsr.sustain;
+    } else {
+      const releaseTime = t - (duration - adsr.release);
+      env = adsr.sustain * Math.max(0, 1 - releaseTime / adsr.release);
+    }
+
+    data[i] = signal * env * 0.4; // Safety headroom
+  }
+
+  // Artificial "Processing" delay to give it a neural vibe
+  setTimeout(() => {
+    setAudioBuffer(buffer);
+    setIsGenerating(false);
+    playBuffer(buffer);
+  }, 450);
+};
 
   const playBuffer = (buf) => {
     if (!buf) return;
