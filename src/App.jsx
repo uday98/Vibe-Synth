@@ -150,9 +150,3 @@ export default function VibeSynth() {
     </div>
   );
 }
-
-// Mount the component automatically if the page has a #root element
-const rootEl = document.getElementById('root');
-if (rootEl) {
-  createRoot(rootEl).render(<VibeSynth />);
-}
