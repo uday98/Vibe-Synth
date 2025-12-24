@@ -1,6 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Sliders, Download, Play, Zap, Music, Sparkles, Image as ImageIcon, Heart, Trash2 } from 'lucide-react';
+import {VibeLibrary} from 'vibeLibrary'
 
 export default function VibeSynth() {
   const [prompt, setPrompt] = useState('');
