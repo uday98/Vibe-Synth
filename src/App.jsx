@@ -15,7 +15,7 @@ export default function VibeSynth() {
   const initAudio = () => {
     if (!audioCtx.current) {
       audioCtx.current = new (window.AudioContext || window.webkitAudioContext)();
-    }
+    
     if (audioCtx.current.state === 'suspended') {
       audioCtx.current.resume();
     }
