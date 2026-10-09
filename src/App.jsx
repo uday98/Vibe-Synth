@@ -1,197 +1,185 @@
-import React, { useState, useRef } from 'react';
-import { createRoot } from 'react-dom/client';
-import { Sliders, Download, Play, Zap, Music, Sparkles, Image as ImageIcon, Heart, Trash2 } from 'lucide-react';
-import {VibeLibrary} from './vibeLibrary'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { interpret } from './sound/interpret.js';
+import { buildParams, noteName } from './sound/blend.js';
+import { renderAsync } from './engine/renderClient.js';
+import { encodeWav } from './engine/wav.js';
+import { useAudio } from './ui/useAudio.js';
+import { Scope } from './ui/Scope.jsx';
+import { Understood } from './ui/Understood.jsx';
+import { Keyboard } from './ui/Keyboard.jsx';
+import { ShapePanel } from './ui/ShapePanel.jsx';
+import { Library } from './ui/Library.jsx';
+import { Icon } from './ui/icons.jsx';
+import { loadLibrary, saveLibrary, encodeRecipe, decodeRecipe, sameRecipe, slug } from './ui/storage.js';
 
-export default function VibeSynth() {
-  const [prompt, setPrompt] = useState('');
-  const [adsr, setAdsr] = useState({ attack: 0.1, decay: 0.3, sustain: 0.4, release: 0.8 });
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [audioBuffer, setAudioBuffer] = useState(null);
-  const [gallery, setGallery] = useState([]); // Local Cache
-  
-  const audioCtx = useRef(null);
+const RENDER_DEBOUNCE_MS = 60;
 
-  // Initialize Audio Context on first interaction
-  const initAudio = () => {
-    if (!audioCtx.current) {
-      audioCtx.current = new (window.AudioContext || window.webkitAudioContext)();
-    }
-    if (audioCtx.current.state === 'suspended') {
-      audioCtx.current.resume();
-    }
+function recipeFromHash() {
+  const m = window.location.hash.match(/#s=([\w-]+)/);
+  return m ? decodeRecipe(m[1]) : null;
+}
+
+function downloadWav(rendered, name) {
+  const blob = new Blob([encodeWav(rendered.left, rendered.right, rendered.sampleRate)], { type: 'audio/wav' });
+  const url = URL.createObjectURL(blob);
+  const a = Object.assign(document.createElement('a'), { href: url, download: `${name}.wav` });
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+export default function App() {
+  const initial = useMemo(recipeFromHash, []);
+  const [text, setText] = useState(initial?.prompt ?? '');
+  const [recipe, setRecipe] = useState(initial);
+  const [rendered, setRendered] = useState(null);
+  const [octave, setOctave] = useState(0);
+  const [library, setLibrary] = useState(loadLibrary);
+  const [notice, setNotice] = useState('');
+  const audio = useAudio();
+
+  const interp = useMemo(() => (recipe ? interpret(recipe.prompt) : null), [recipe?.prompt]);
+  const built = useMemo(() => (interp ? buildParams(interp, recipe.overrides) : null), [interp, recipe?.overrides]);
+  const color = built?.color ?? '#5b6bd6';
+
+  // Render whenever the recipe changes. Versions drop stale results when the
+  // user drags a slider faster than renders finish.
+  const wanted = useRef(0);
+  const ready = useRef(0);
+  const playWhenReady = useRef(false);
+  useEffect(() => {
+    if (!built) return undefined;
+    const v = ++wanted.current;
+    const timer = setTimeout(async () => {
+      const out = await renderAsync(built.params, audio.sampleRate());
+      if (v !== wanted.current) return;
+      audio.load(out);
+      setRendered(out);
+      ready.current = v;
+      if (playWhenReady.current) { playWhenReady.current = false; audio.play(0); }
+    }, RENDER_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [built]);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Keep the URL in step with the sound so any sound is shareable as a link.
+  useEffect(() => {
+    if (recipe) history.replaceState(null, '', `#s=${encodeRecipe(recipe)}`);
+  }, [recipe]);
+
+  useEffect(() => saveLibrary(library), [library]);
+
+  useEffect(() => {
+    if (!notice) return undefined;
+    const t = setTimeout(() => setNotice(''), 2200);
+    return () => clearTimeout(t);
+  }, [notice]);
+
+  const audition = useCallback(() => {
+    if (ready.current === wanted.current && rendered) audio.play(0);
+    else playWhenReady.current = true;
+  }, [audio, rendered]);
+
+  const make = (prompt) => {
+    const next = { prompt: prompt.trim(), overrides: {} };
+    if (!next.prompt) return;
+    setText(next.prompt);
+    if (sameRecipe(next, recipe)) { audition(); return; }
+    playWhenReady.current = true;
+    setRecipe(next);
   };
 
-  const synthesizeSound = async () => {
-  initAudio();
-  setIsGenerating(true);
-  
-  const ctx = audioCtx.current;
-  const sampleRate = ctx.sampleRate;
-  const duration = 2.0; // 2-second sample length
-  const buffer = ctx.createBuffer(1, sampleRate * duration, sampleRate);
-  const data = buffer.getChannelData(0);
+  const setOverrides = (overrides) => setRecipe((r) => ({ ...r, overrides }));
+  const isSaved = library.some((it) => sameRecipe({ prompt: it.prompt, overrides: it.overrides }, recipe));
 
-  // 1. SCAN PROMPT FOR KEYWORDS
-  const words = prompt.toLowerCase().split(/\s+/);
-  const activeVibes = words.filter(word => VibeLibrary[word]);
-
-  // Default values if no keyword is found
-  let settings = { baseFreq: 220, noise: 0.01, fm: 0, dist: 0 };
-
-  // 2. BLEND VIBES (Averaging the "DNA")
-  if (activeVibes.length > 0) {
-    let totalFreq = 0;
-    let totalNoise = 0;
-    let totalFM = 0;
-    let totalDist = 0;
-
-    activeVibes.forEach(v => {
-      const p = VibeLibrary[v];
-      totalFreq += p.baseFreq;
-      totalNoise += p.noise;
-      totalFM += p.fmIndex;
-      totalDist += p.dist;
-    });
-
-    settings.baseFreq = totalFreq / activeVibes.length;
-    settings.noise = totalNoise / activeVibes.length;
-    settings.fm = totalFM / activeVibes.length;
-    settings.dist = totalDist / activeVibes.length;
-  }
-
-  // 3. RENDER THE AUDIO DATA
-  for (let i = 0; i < buffer.length; i++) {
-    const t = i / sampleRate;
-    
-    // Carrier Frequency + (Modulator * Index)
-    // We use a 1.618 (Golden Ratio) multiplier for the modulator for "musical" harmonics
-    const modulator = Math.sin(2 * Math.PI * (settings.baseFreq * 1.618) * t) * settings.fm;
-    let signal = Math.sin(2 * Math.PI * settings.baseFreq * t + modulator);
-    
-    // Add Layered Noise
-    const whiteNoise = (Math.random() * 2 - 1) * settings.noise;
-    signal += whiteNoise;
-
-    // Apply Saturation / Distortion
-    if (settings.dist > 0) {
-      // Soft-clipping using Hyperbolic Tangent
-      signal = Math.tanh(signal * (1 + settings.dist * 4));
-    }
-
-    // Apply ADSR Envelope
-    let env = 0;
-    if (t < adsr.attack) {
-      env = t / adsr.attack;
-    } else if (t < adsr.attack + adsr.decay) {
-      env = 1 - ((t - adsr.attack) / adsr.decay) * (1 - adsr.sustain);
-    } else if (t < duration - adsr.release) {
-      env = adsr.sustain;
+  const toggleSave = () => {
+    if (!recipe) return;
+    if (isSaved) {
+      setLibrary((l) => l.filter((it) => !sameRecipe({ prompt: it.prompt, overrides: it.overrides }, recipe)));
+      setNotice('Removed from saved sounds');
     } else {
-      const releaseTime = t - (duration - adsr.release);
-      env = adsr.sustain * Math.max(0, 1 - releaseTime / adsr.release);
+      setLibrary((l) => [{ id: Date.now(), name: recipe.prompt, ...recipe }, ...l]);
+      setNotice('Saved');
     }
-
-    data[i] = signal * env * 0.4; // Safety headroom
-  }
-
-  // Artificial "Processing" delay to give it a neural vibe
-  setTimeout(() => {
-    setAudioBuffer(buffer);
-    setIsGenerating(false);
-    playBuffer(buffer);
-  }, 450);
-};
-
-  const playBuffer = (buf) => {
-    if (!buf) return;
-    initAudio();
-    const source = audioCtx.current.createBufferSource();
-    source.buffer = buf;
-    source.connect(audioCtx.current.destination);
-    source.start();
   };
 
-  const quickSave = () => {
-    if (!audioBuffer) return;
-    const id = Date.now();
-    const newVibe = { id, buffer: audioBuffer, name: prompt || `Vibe ${gallery.length + 1}` };
-    setGallery([newVibe, ...gallery]);
+  const copyLink = async () => {
+    try { await navigator.clipboard.writeText(window.location.href); setNotice('Link copied'); }
+    catch { setNotice('Copy the address bar to share this sound'); }
+  };
+
+  const openSaved = (it, play) => {
+    setText(it.prompt);
+    playWhenReady.current = play;
+    setRecipe({ prompt: it.prompt, overrides: it.overrides || {} });
+  };
+
+  const downloadSaved = async (it) => {
+    const b = buildParams(interpret(it.prompt), it.overrides || {});
+    const out = await renderAsync(b.params, audio.sampleRate());
+    downloadWav(out, `${slug(it.prompt)}-${noteName(b.midi)}`);
   };
 
   return (
-    <div className="min-h-screen bg-[#0a0a0c] text-white p-4 font-sans text-sm pb-20">
-      <div className="max-w-md mx-auto space-y-6">
-        
-        {/* Header */}
-        <div className="pt-6 border-b border-zinc-800 pb-4 flex justify-between items-center">
-          <h1 className="text-xl font-black italic tracking-tighter text-indigo-400 uppercase">VibeSynth</h1>
-          <div className="flex gap-2">
-            <button className="p-2 bg-zinc-900 rounded-lg text-zinc-500"><ImageIcon size={18}/></button>
+    <main className="app" style={{ '--accent': color }}>
+      <header className="masthead">
+        <h1>VibeSynth</h1>
+        <p>Describe a sound. Hear it, shape it, play it.</p>
+      </header>
+
+      <form className="prompt" onSubmit={(e) => { e.preventDefault(); make(text); }}>
+        <input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="dark haunting bass"
+          aria-label="Describe a sound"
+          maxLength={200}
+          autoComplete="off"
+          spellCheck="false"
+        />
+        <button type="submit" className="primary" disabled={!text.trim()}>Make sound</button>
+      </form>
+
+      <Understood interp={interp} onExample={make} />
+
+      <section className={`scope${rendered ? '' : ' empty'}`} aria-label="Current sound">
+        <Scope audio={rendered} color={color} playhead={audio.playhead} now={audio.now} />
+        {!rendered && <p className="scope-empty">Your sound appears here</p>}
+        <div className="transport">
+          <span className="readout">
+            {built && rendered ? `${noteName(built.midi)}, ${rendered.duration.toFixed(1)} s` : ''}
+          </span>
+          <div className="transport-buttons">
+            {audio.playhead
+              ? <button type="button" className="icon-button" onClick={audio.stop} aria-label="Stop"><Icon name="stop" /></button>
+              : <button type="button" className="icon-button" onClick={audition} disabled={!rendered} aria-label="Play"><Icon name="play" /></button>}
+            <button type="button" className={`icon-button${isSaved ? ' on' : ''}`} onClick={toggleSave} disabled={!rendered}
+              aria-pressed={isSaved} aria-label={isSaved ? 'Remove from saved sounds' : 'Save sound'}><Icon name="save" /></button>
+            <button type="button" className="icon-button" onClick={() => downloadWav(rendered, `${slug(recipe.prompt)}-${noteName(built.midi)}`)}
+              disabled={!rendered} aria-label="Download WAV"><Icon name="download" /></button>
+            <button type="button" className="icon-button" onClick={copyLink} disabled={!rendered} aria-label="Copy link to this sound"><Icon name="link" /></button>
           </div>
         </div>
+      </section>
 
-        {/* PROMPT INPUT */}
-        <div className="space-y-2">
-          <input 
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            placeholder="Describe the sound (e.g. Dark Techno Kick)"
-            className="w-full bg-zinc-900 border border-zinc-800 rounded-xl p-4 text-sm focus:ring-1 focus:ring-indigo-500 outline-none transition"
-          />
-        </div>
+      <Keyboard rootMidi={built?.midi ?? 60} octave={octave} setOctave={setOctave} onNote={audio.play} disabled={!rendered} />
 
-        {/* ADSR SLIDERS */}
-        <div className="bg-zinc-900/40 p-5 rounded-2xl border border-zinc-800 space-y-4">
-          <div className="flex justify-between items-center opacity-50 text-[10px] uppercase font-bold tracking-widest">
-            <span>Envelope (ADSR)</span>
-            <Sliders size={12} />
-          </div>
-          {Object.keys(adsr).map(key => (
-            <div key={key} className="flex items-center gap-4">
-              <span className="w-8 text-[10px] uppercase text-zinc-500">{key[0]}</span>
-              <input 
-                type="range" min="0.01" max="1.5" step="0.01" value={adsr[key]}
-                onChange={(e) => setAdsr({...adsr, [key]: parseFloat(e.target.value)})}
-                className="flex-1 h-1 bg-zinc-800 rounded-lg appearance-none accent-indigo-500"
-              />
-            </div>
-          ))}
-        </div>
+      {built && (
+        <ShapePanel
+          params={built.params}
+          midi={built.midi}
+          overrides={recipe.overrides}
+          onChange={setOverrides}
+          onCommit={audition}
+          onReset={() => { setOverrides({}); playWhenReady.current = true; }}
+        />
+      )}
 
-        {/* MAIN ACTIONS */}
-        <div className="grid grid-cols-5 gap-2">
-          <button 
-            onClick={synthesizeSound}
-            className="col-span-4 py-4 bg-indigo-600 rounded-2xl font-bold uppercase tracking-widest flex items-center justify-center gap-2 active:scale-95 transition-all shadow-lg shadow-indigo-500/20"
-          >
-            {isGenerating ? 'Dreaming...' : 'Generate'} <Sparkles size={16}/>
-          </button>
-          <button 
-            onClick={quickSave}
-            disabled={!audioBuffer}
-            className="col-span-1 bg-zinc-900 border border-zinc-800 rounded-2xl flex items-center justify-center text-rose-500 disabled:opacity-20"
-          >
-            <Heart size={20} fill={audioBuffer ? "currentColor" : "none"}/>
-          </button>
-        </div>
+      <Library items={library} onPlay={(it) => openSaved(it, true)} onOpen={(it) => openSaved(it, false)}
+        onDownload={downloadSaved} onDelete={(id) => setLibrary((l) => l.filter((it) => it.id !== id))} />
 
-        {/* CACHED GALLERY */}
-        <div className="space-y-3">
-          <h3 className="text-[10px] uppercase tracking-widest text-zinc-500 font-bold">Saved Vibes</h3>
-          {gallery.length === 0 && <div className="text-zinc-700 italic text-xs">No saved vibes yet...</div>}
-          {gallery.map(vibe => (
-            <div key={vibe.id} className="flex items-center justify-between bg-zinc-900/80 p-3 rounded-xl border border-zinc-800">
-              <div className="flex items-center gap-3">
-                <button onClick={() => playBuffer(vibe.buffer)} className="w-8 h-8 bg-indigo-500/20 text-indigo-400 rounded-full flex items-center justify-center"><Play size={14} fill="currentColor"/></button>
-                <span className="text-xs font-medium truncate w-32">{vibe.name}</span>
-              </div>
-              <button onClick={() => setGallery(gallery.filter(g => g.id !== vibe.id))} className="text-zinc-600 hover:text-red-400"><Trash2 size={14}/></button>
-            </div>
-          ))}
-        </div>
-
-      </div>
-    </div>
+      <footer>Every sound is synthesised in your browser. Nothing is uploaded.</footer>
+      <div className="notice" role="status" aria-live="polite">{notice}</div>
+    </main>
   );
 }
